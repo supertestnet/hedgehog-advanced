@@ -942,9 +942,9 @@
                     return true;
                 },
                 invoicePaid: async () => {
-                    var preimage = prompt( `Enter the preimage of the invoice you paid, or data from your counterparty if they claim they paid it` );
-                    //TODO: prepare a transaction sweeping the htlc in case your counterparty
-                    //doesn't resolve the htlc in a timely manner
+                    var preimage = prompt( `Enter the preimage of the invoice you paid or data from your counterparty if they claim they paid it` );
+                    //TODO: prepare a transaction sweeping the htlc via its preimage in case
+                    //your counterparty doesn't resolve the htlc in a timely manner
                     if ( preimage.length === 64 ) {
                         var hash_given = await nobleSecp256k1.utils.sha256( hedgehog.hexToBytes( preimage ) );
                         hash_given = hedgehog.bytesToHex( hash_given );
