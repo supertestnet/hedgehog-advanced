@@ -15,6 +15,8 @@
         <script src="https://supertestnet.github.io/hedgehog-advanced/noble-secp256k1.js"></script>
         <script src="https://supertestnet.github.io/hedgehog-advanced/rmd160.js"></script>
         <script src="https://supertestnet.github.io/bitcoin-chess/js/bolt11.js"></script>
+        <script src="https://supertestnet.github.io/nwcjs/nwcjs.js"></script>
+        <script src="https://bundle.run/browserify-cipher@1.0.1"></script>
         <script>
             var hedgehog = {
                 network: "regtest",
@@ -154,13 +156,13 @@
                     var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
                     if ( htlc_hash ) var [ htlc_address, htlc_preimage, htlc_hash ] = hedgehog.createHtlc( chan_id, am_sender, htlc_hash );
                     else var [ htlc_address, htlc_preimage, htlc_hash ] = hedgehog.createHtlc( chan_id, am_sender );
-                    if ( am_alice ) var sender = "alice";
-                    else var sender = "bob";
+                    if ( am_alice ) var funder = "alice";
+                    else var funder = "bob";
                     var item_to_push = {
                         timestamp: Math.floor( Date.now() / 1000 ),
                         output: hedgehog.getVout( amt_to_send, htlc_address ),
                         hash: htlc_hash,
-                        sender,
+                        funder,
                     }
                     if ( htlc_preimage ) item_to_push[ "preimage" ] = htlc_preimage;
                     hedgehog.state[ chan_id ][ "extra_outputs" ].push( item_to_push );
@@ -388,19 +390,19 @@
 
                     //reduce each user's balance by the amounts in extra outputs
                     hedgehog.state[ chan_id ].extra_outputs.forEach( item => {
-                        if ( am_alice && item[ "sender" ] === "alice" ) {
+                        if ( am_alice && item[ "funder" ] === "alice" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_alice = amnt_for_alice - amt_in_extra_output;
                         }
-                        if ( am_alice && item[ "sender" ] === "bob" ) {
+                        if ( am_alice && item[ "funder" ] === "bob" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_bob = amnt_for_bob - amt_in_extra_output;
                         }
-                        if ( !am_alice && item[ "sender" ] === "alice" ) {
+                        if ( !am_alice && item[ "funder" ] === "alice" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_alice = amnt_for_alice - amt_in_extra_output;
                         }
-                        if ( !am_alice && item[ "sender" ] === "bob" ) {
+                        if ( !am_alice && item[ "funder" ] === "bob" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_bob = amnt_for_bob - amt_in_extra_output;
                         }
@@ -505,8 +507,8 @@
                     if ( conditional_revocation_sig ) object[ "conditional_revocation_sig" ] = conditional_revocation_sig;
                     if ( full_revocation_is_necessary ) object[ "full_revocation_preimage" ] = full_revocation_preimage;
                     if ( fund_extra_output ) {
-                        if ( am_alice ) var sender = "alice";
-                        else var sender = "bob";
+                        if ( am_alice ) var funder = "alice";
+                        else var funder = "bob";
                         object[ "extra_output_info" ] = {
                             amnt: hedgehog.state[ chan_id ].extra_outputs[ hedgehog.state[ chan_id ].extra_outputs.length - 1 ][ "output" ][ "value" ],
                             type: "hrtc",
@@ -615,33 +617,11 @@
                     if ( "extra_output_info" in data ) {
                         extra_output_exists = true;
                         var am_sender = false;
-                        if ( am_alice ) var sender = "bob";
-                        else var sender = "alice";
-                        var [ htlc_address, htlc_preimage, htlc_hash ] = hedgehog.createHtlc( chan_id, am_sender, data[ "extra_output_info" ][ "hash" ] );
-                        if ( htlc_address !== data[ "extra_output_info" ][ "addy" ] ) {
-                            //restore old state and inform user this state update was invalid
-                            if ( am_alice ) {
-                                hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
-                                hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
-                            } else {
-                                hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
-                                hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
-                            }
-                            return alert( `Your counterparty sent you invalid extra_output_info so it will be ignored` );
-                        }
-                        var amt_to_send = data[ "extra_output_info" ][ "amnt" ];
-                        var item_to_push = {
-                            timestamp: Math.floor( Date.now() / 1000 ),
-                            output: hedgehog.getVout( amt_to_send, htlc_address ),
-                            hash: htlc_hash,
-                            sender,
-                        }
-                        if ( "invc" in data[ "extra_output_info" ] ) {
-                            invoice = data[ "extra_output_info" ][ "invc" ];
-                            var inv_amt = hedgehog.getInvoiceAmount( invoice );
-                            var fee = amt_to_send - inv_amt;
-                            var wanna_pay = confirm( `Do you want to pay an invoice for ${inv_amt} sats and receive ${fee} sats as a fee?` );
-                            if ( !wanna_pay ) {
+                        if ( am_alice ) var funder = "bob";
+                        else var funder = "alice";
+                        if ( data[ "extra_output_info" ][ "type" ] === "hrtc" ) {
+                            var [ htlc_address, htlc_preimage, htlc_hash ] = hedgehog.createHtlc( chan_id, am_sender, data[ "extra_output_info" ][ "hash" ] );
+                            if ( htlc_address !== data[ "extra_output_info" ][ "addy" ] ) {
                                 //restore old state and inform user this state update was invalid
                                 if ( am_alice ) {
                                     hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
@@ -650,27 +630,62 @@
                                     hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
                                     hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
                                 }
-                                return alert( `Your counterparty sent you invalid main-sig data so it will be ignored` );
+                                return alert( `Your counterparty sent you invalid extra_output_info so it will be ignored` );
                             }
-                            var pmthash = hedgehog.getInvoicePmthash( invoice );
-                            invoice_hash = pmthash;
-                            if ( pmthash != data[ "extra_output_info" ][ "hash" ] ) {
-                                //restore old state and inform user this state update was invalid
-                                if ( am_alice ) {
-                                    hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
-                                    hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
-                                } else {
-                                    hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
-                                    hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
+                            var amt_to_send = data[ "extra_output_info" ][ "amnt" ];
+                            var item_to_push = {
+                                timestamp: Math.floor( Date.now() / 1000 ),
+                                output: hedgehog.getVout( amt_to_send, htlc_address ),
+                                hash: htlc_hash,
+                                funder,
+                            }
+                            if ( "invc" in data[ "extra_output_info" ] ) {
+                                invoice = data[ "extra_output_info" ][ "invc" ];
+                                var inv_amt = hedgehog.getInvoiceAmount( invoice );
+                                var fee = amt_to_send - inv_amt;
+                                var wanna_pay = confirm( `Do you want to pay an invoice for ${inv_amt} sats and receive ${fee} sats as a fee?` );
+                                if ( !wanna_pay ) {
+                                    //restore old state and inform user this state update was invalid
+                                    if ( am_alice ) {
+                                        hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                                        hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                                    } else {
+                                        hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                                        hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
+                                    }
+                                    //TODO: inform the sender so the counterparties don't get out of sync
+                                    return alert( `You did not want to pay this invoice so this state update will be ignored` );
                                 }
-                                return alert( `Your counterparty sent you invalid main-sig data so it will be ignored` );
+                                var pmthash = hedgehog.getInvoicePmthash( invoice );
+                                invoice_hash = pmthash;
+                                if ( pmthash != data[ "extra_output_info" ][ "hash" ] ) {
+                                    //restore old state and inform user this state update was invalid
+                                    if ( am_alice ) {
+                                        hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                                        hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                                    } else {
+                                        hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                                        hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
+                                    }
+                                    return alert( `Your counterparty sent you invalid invoice data so it will be ignored` );
+                                }
+                                hedgehog.state.invoice_hashes[ pmthash ] = {
+                                    chan_id,
+                                    index: hedgehog.state[ chan_id ][ "extra_outputs" ].length,
+                                }
                             }
-                            hedgehog.state.invoice_hashes[ pmthash ] = {
-                                chan_id,
-                                index: hedgehog.state[ chan_id ][ "extra_outputs" ].length,
-                            }
+                            hedgehog.state[ chan_id ][ "extra_outputs" ].push( item_to_push );
                         }
-                        hedgehog.state[ chan_id ][ "extra_outputs" ].push( item_to_push );
+                        if ( data[ "extra_output_info" ][ "type" ] === "chan" ) {
+                            //the funder should start by saying what
+                            //txid, vout, amnt, and addy belong to the
+                            //utxo that will be deposited in this channel
+                            //then I should validate the addy by checking
+                            //that I am bob in this channel, then give the
+                            //requisite sigs so alice can force close
+                            //then wait for alice to send the state update
+                            //& validate it & add the channel to the state
+                        }
                     }
 
                     //increase the recipient's balance by amnt and decrease the sender's by
@@ -686,19 +701,19 @@
 
                     //reduce each user's balance by the amounts in extra outputs
                     hedgehog.state[ chan_id ].extra_outputs.forEach( item => {
-                        if ( am_alice && item[ "sender" ] === "alice" ) {
+                        if ( am_alice && item[ "funder" ] === "alice" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_alice = amnt_for_alice - amt_in_extra_output;
                         }
-                        if ( am_alice && item[ "sender" ] === "bob" ) {
+                        if ( am_alice && item[ "funder" ] === "bob" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_bob = amnt_for_bob - amt_in_extra_output;
                         }
-                        if ( !am_alice && item[ "sender" ] === "alice" ) {
+                        if ( !am_alice && item[ "funder" ] === "alice" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_alice = amnt_for_alice - amt_in_extra_output;
                         }
-                        if ( !am_alice && item[ "sender" ] === "bob" ) {
+                        if ( !am_alice && item[ "funder" ] === "bob" ) {
                             var amt_in_extra_output = item[ "output" ][ "value" ];
                             amnt_for_bob = amnt_for_bob - amt_in_extra_output;
                         }
@@ -841,7 +856,7 @@
                             if ( invoice_hash ) delete hedgehog.state.invoice_hashes[ invoice_hash ];
                             return alert( `Your counterparty sent you invalid full-rev data (no pmg) so it will be ignored` );
                         }
-                        //TODO: ensure checking this sig doesn't crash the app
+                        //TODO: ensure checking this preimage doesn't crash the app
                         if ( am_alice ) var prev_address = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 2 ][ 0 ];
                         else var prev_address = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 2 ][ 0 ];
                         if ( am_alice ) var prev_scripts = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 2 ][ 1 ];
@@ -901,7 +916,7 @@
                         else new_tx1.vin[ 0 ].witness = [ conditional_cosignature, conditional_revocation_sig, tx1_script, cblock ];
                     }
 
-                    //if necessary, prepare and save the conditional revocation transaction
+                    //if necessary, prepare and save the full revocation transaction
                     if ( full_revocation_is_necessary ) {
                         var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tx2_tree, target: tx2_target });
                         tx2.vin[ 0 ].witness = [ full_revocation_sig, preimage, tx2_script, cblock ];
@@ -934,9 +949,35 @@
                     hedgehog.state[ chan_id ].i_was_last_to_send = false;
 
                     if ( invoice ) {
-                        console.log( `Please pay this invoice:` );
-                        console.log( invoice );
-                        setTimeout( () => {alert( `Please pay the invoice in your console` );}, 300 );
+                        if ( !nwcjs.nwc_objs.length ) {
+                            console.log( `Please pay this invoice:` );
+                            console.log( invoice );
+                            setTimeout( () => {alert( `Please pay the invoice in your console` );}, 300 );
+                        } else {
+                            var nwc_obj = nwcjs.nwc_objs[ 0 ];
+                            await nwcjs.tryToPayInvoice( nwc_obj, invoice );
+                            var preimage;
+                            var time_waited = 0;
+                            var stop;
+                            var findOut = async () => {
+                                console.log( 'checking again...' );
+                                preimage = await nwcjs.didPaymentSucceed( nwc_obj, invoice, 4 );
+                                if ( !preimage && !stop ) {
+                                    await nwcjs.waitSomeSeconds( 1 );
+                                    return await findOut();
+                                }
+                            }
+                            findOut();
+                            var loop = async () => {
+                                await nwcjs.waitSomeSeconds( 1 );
+                                time_waited = time_waited + 1;
+                                console.log( `time waited:`, time_waited );
+                                if ( !preimage ) return await loop();
+                                return preimage;
+                            }
+                            await loop();
+                            console.log( "preimage:", preimage );
+                        }
                     }
 
                     return true;
@@ -959,6 +1000,11 @@
                                 index,
                             }
                         }
+                        //update the balances
+                        var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+                        var value_to_add = hedgehog.state[ chan_id ].extra_outputs[ index ][ "output" ][ "value" ];
+                        if ( am_alice ) hedgehog.state[ chan_id ].balances = [ hedgehog.state[ chan_id ].balances[ 0 ] + value_to_add, hedgehog.state[ chan_id ].balances[ 1 ] - value_to_add ];
+                        else hedgehog.state[ chan_id ].balances = [ hedgehog.state[ chan_id ].balances[ 0 ] - value_to_add, hedgehog.state[ chan_id ].balances[ 1 ] + value_to_add ];
                         hedgehog.state[ chan_id ].extra_outputs.splice( index, 1 );
                         delete hedgehog.state.invoice_hashes[ hash_given ];
                         alert( `click ok and then send the info that is about to appear in your console to your counterparty` );
@@ -974,12 +1020,12 @@
                             hash_given = hedgehog.bytesToHex( hash_given );
                             var hash_expected = hedgehog.state[ chan_id ].extra_outputs[ index ][ "hash" ];
                             if ( hash_given !== hash_expected ) return alert( `Your counterparty tried to scam you, time to force close` );
-                            var amt_to_send = hedgehog.state[ chan_id ].extra_outputs[ index ][ "output" ][ "value" ];
+                            var value_to_add = hedgehog.state[ chan_id ].extra_outputs[ index ][ "output" ][ "value" ];
                             hedgehog.state[ chan_id ].extra_outputs.splice( index, 1 );
-                            alert( `click ok and then send the info that is about to appear in your console to your counterparty` );
-                            var msg_for_counterparty = hedgehog.send( chan_id, amt_to_send )
-                            console.log( JSON.stringify( msg_for_counterparty ) );
-                            return msg_for_counterparty;
+                            //update the balances
+                            var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+                            if ( am_alice ) hedgehog.state[ chan_id ].balances = [ hedgehog.state[ chan_id ].balances[ 0 ] - value_to_add, hedgehog.state[ chan_id ].balances[ 1 ] + value_to_add ];
+                            else hedgehog.state[ chan_id ].balances = [ hedgehog.state[ chan_id ].balances[ 0 ] + value_to_add, hedgehog.state[ chan_id ].balances[ 1 ] - value_to_add ];
                         }
                     }
                 },
@@ -1021,6 +1067,9 @@
                 font-size: 1.15rem;
                 border: 1px solid grey;
             }
+            .hidden {
+                display: none;
+            }
             @media screen and (max-width: 600px) {
             }
         </style>
@@ -1034,11 +1083,12 @@
         </script>
     </head>
     <body>
-        <script>var push_all_funds_to_counterparty = true; if ( $_GET[ "alice" ] == "true" ) push_all_funds_to_counterparty = false;</script>
+        <script>var push_all_funds_to_counterparty = false; if ( $_GET[ "bob" ] == "true" ) push_all_funds_to_counterparty = true;</script>
         <h1>Welcome to hedgehog</h1>
         <p><button class="send_btn">Send</button><button class="receive_btn">Receive</button><br><button onclick="hedgehog.openChannel( push_all_funds_to_counterparty )" class="open_channel">Open channel</button><br><button class="close_channel">Close channel</button><br><button class="pay_invoice">Pay invoice</button><br><button class="invoice_paid" onclick="console.log( JSON.stringify( hedgehog.invoicePaid() ) );">Invoice paid</button></p>
+        <div class="nwc_div hidden"><p>Add an NWC string with full permissions</p><input class="nwc_string"><p><button class="add_nwc" onclick="var success = !!nwcjs.processNWCstring( $( '.nwc_string' ).value ); if ( success ) $( '.nwc_div' ).remove();">Add NWC</button></p></div>
         <script>
-            if ( $_GET[ "alice" ] == "true" ) {
+            if ( !$_GET[ "bob" ] ) {
                 var privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
                 var pubkey = nobleSecp256k1.getPublicKey( privkey, true ).substring( 2 );
                 var preimage = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
@@ -1046,7 +1096,20 @@
                 hedgehog.keypairs[ pubkey ] = {privkey, preimage};
                 console.log( "Your pubkey/hash pair:" );
                 console.log( JSON.stringify( [ pubkey, hash ] ) );
+            } else {
+                $( '.nwc_div' ).classList.remove( "hidden" );
             }
+            //I need a way for Alice to create *any invoice* but where Bob
+            //still knows he will get his money if Alice gets paid
+            //Problem: as soon as Alice detects a pending payment, she can
+            //settle it, thus taking custody of money that should have
+            //gone to Bob. What if I have Alice deposit the value of the
+            //invoice into an off-chain htlc *before* Bob sends any money?
+            //I can make it so she has to disclose *her* preimage in order
+            //to take her money out via the timelock path, whereas Bob can
+            //take Alice's money if he discloses *his* preimage. But then,
+            //what is Alice's incentive to deposit money into that htlc?
+            //Bob will just run away with it. I could probably 
         </script>
     </body>
 </html>
