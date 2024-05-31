@@ -128,10 +128,10 @@
                     var htlc_scripts = [
                         //TODO: change the 5 to a 2016
                         [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", sender, "OP_CHECKSIG" ],
-                        [ "OP_SIZE", 16, "OP_EQUALVERIFY", "OP_SHA256", payment_hash, "OP_EQUALVERIFY", recipient, "OP_CHECKSIG" ],
+                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", payment_hash, "OP_EQUALVERIFY", recipient, "OP_CHECKSIG" ],
                     ];
                     var htlc_address = hedgehog.makeAddress( chan_id, htlc_scripts );
-                    return [ htlc_address, htlc_preimage, payment_hash ];
+                    return [ htlc_address, htlc_preimage, payment_hash, htlc_scripts ];
                 },
                 getInvoicePmthash: invoice => {
                     var decoded = bolt11.decode( invoice );
@@ -419,6 +419,44 @@
                     //add all extra outputs e.g. unresolved htlcs to tx1
                     var outputs_to_add = [...hedgehog.state[ chan_id ].extra_outputs].map(item => item[ "output" ]);
                     tx1.vout = [...tx1.vout, ...outputs_to_add];
+                    var tx1_id = tapscript.Tx.util.getTxid( tx1 );
+                    hedgehog.state[ chan_id ].txids_to_watch_for[ tx0_id ][ "tx1_id" ] = tx1_id;
+
+                    hedgehog.state[ chan_id ].extra_outputs.forEach( ( item, index ) => {
+                        //prepare a tx sweeping the htlc via its timelock path in case
+                        //your counterparty doesn't resolve the htlc in a timely manner
+                        var txid_if_they_force_close = tx1_id;
+                        var txid_of_they_force_close_parent = tx0_id;
+                        var vout = index + 2;
+                        if ( hedgehog.state[ chan_id ].balances.includes( 0 ) ) vout = index + 1;
+                        var amnt = item[ "output" ][ "value" ];
+                        var addy = tapscript.Address.fromScriptPubKey( item[ "output" ][ "scriptPubKey" ], hedgehog.network );
+                        var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+                        if ( am_alice ) var my_address = hedgehog.state[ chan_id ].alices_address;
+                        else var my_address = hedgehog.state[ chan_id ].bobs_address;
+                        if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_privkey;
+                        else var privkey = hedgehog.state[ chan_id ].bobs_privkey;
+                        var sweep_tx = tapscript.Tx.create({
+                            //TODO: change the 5 to a 2016
+                            vin: [hedgehog.getVin( txid_if_they_force_close, vout, amnt, addy, 5 )],
+                            vout: [hedgehog.getVout( amnt - 500, my_address )],
+                        });
+                        var am_sender = true;
+                        var [ htlc_address, htlc_preimage, htlc_hash, htlc_scripts ] = hedgehog.createHtlc( chan_id, am_sender, item[ "hash" ] );
+                        var sweep_tx_script = htlc_scripts[ 0 ];
+                        var sweep_tx_target = tapscript.Tap.encodeScript( sweep_tx_script );
+                        var sweep_tx_tree = htlc_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                        var sweep_sig = tapscript.Signer.taproot.sign( privkey, sweep_tx, 0, { extension: sweep_tx_target }).hex;
+                        var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: sweep_tx_tree, target: sweep_tx_target });
+                        sweep_tx.vin[ 0 ].witness = [ sweep_sig, sweep_tx_script, cblock ];
+                        var sweep_tx_txhex = tapscript.Tx.encode( sweep_tx ).hex;
+
+                        //save the tx sweeping the htlc via its timelock path in case
+                        //your counterparty doesn't resolve the htlc in a timely manner
+                        if ( !( "timelock_sweep_txs" in hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_they_force_close_parent ] ) )
+                            hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_they_force_close_parent ][ "timelock_sweep_txs" ] = [];
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_they_force_close_parent ][ "timelock_sweep_txs" ].push( sweep_tx_txhex );
+                    });
 
                     // console.log( "tx0:", JSON.stringify( tx0 ) );
                     // console.log( "tx1:", JSON.stringify( tx1 ) );
@@ -467,7 +505,45 @@
                         }
 
                         //add all extra outputs e.g. unresolved htlcs to new_tx1
-                        new_tx1.vout = [...tx1.vout, ...outputs_to_add];
+                        new_tx1.vout = [...new_tx1.vout, ...outputs_to_add];
+                        var new_tx1_id = tapscript.Tx.util.getTxid( new_tx1 );
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ prev_txid ][ "new_tx1_id" ] = new_tx1_id;
+
+                        hedgehog.state[ chan_id ].extra_outputs.forEach( ( item, index ) => {
+                            //prepare a tx sweeping the htlc via its timelock path in case
+                            //your counterparty broadcasts old state
+                            var txid_if_i_force_close = new_tx1_id;
+                            var txid_of_i_force_close_parent = prev_txid;
+                            var vout = index + 2;
+                            if ( hedgehog.state[ chan_id ].balances.includes( 0 ) ) vout = index + 1;
+                            var amnt = item[ "output" ][ "value" ];
+                            var addy = tapscript.Address.fromScriptPubKey( item[ "output" ][ "scriptPubKey" ], hedgehog.network );
+                            var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+                            if ( am_alice ) var my_address = hedgehog.state[ chan_id ].alices_address;
+                            else var my_address = hedgehog.state[ chan_id ].bobs_address;
+                            if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_privkey;
+                            else var privkey = hedgehog.state[ chan_id ].bobs_privkey;
+                            var sweep_tx = tapscript.Tx.create({
+                                //TODO: change the 5 to a 2016
+                                vin: [hedgehog.getVin( txid_if_i_force_close, vout, amnt, addy, 5 )],
+                                vout: [hedgehog.getVout( amnt - 500, my_address )],
+                            });
+                            var am_sender = true;
+                            var [ htlc_address, htlc_preimage, htlc_hash, htlc_scripts ] = hedgehog.createHtlc( chan_id, am_sender, item[ "hash" ] );
+                            var sweep_tx_script = htlc_scripts[ 0 ];
+                            var sweep_tx_target = tapscript.Tap.encodeScript( sweep_tx_script );
+                            var sweep_tx_tree = htlc_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                            var sweep_sig = tapscript.Signer.taproot.sign( privkey, sweep_tx, 0, { extension: sweep_tx_target }).hex;
+                            var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: sweep_tx_tree, target: sweep_tx_target });
+                            sweep_tx.vin[ 0 ].witness = [ sweep_sig, sweep_tx_script, cblock ];
+                            var sweep_tx_txhex = tapscript.Tx.encode( sweep_tx ).hex;
+
+                            //save the tx sweeping the htlc via its timelock path in case
+                            //your counterparty doesn't resolve the htlc in a timely manner
+                            if ( !( "timelock_sweep_txs" in hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_i_force_close_parent ] ) )
+                                hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_i_force_close_parent ][ "timelock_sweep_txs" ] = [];
+                            hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_i_force_close_parent ][ "timelock_sweep_txs" ].push( sweep_tx_txhex );
+                        });
 
                         var new_tx1_script = prev_scripts[ 0 ];
                         var new_tx1_target = tapscript.Tap.encodeScript( new_tx1_script );
@@ -507,13 +583,12 @@
                     if ( conditional_revocation_sig ) object[ "conditional_revocation_sig" ] = conditional_revocation_sig;
                     if ( full_revocation_is_necessary ) object[ "full_revocation_preimage" ] = full_revocation_preimage;
                     if ( fund_extra_output ) {
-                        if ( am_alice ) var funder = "alice";
-                        else var funder = "bob";
                         object[ "extra_output_info" ] = {
                             amnt: hedgehog.state[ chan_id ].extra_outputs[ hedgehog.state[ chan_id ].extra_outputs.length - 1 ][ "output" ][ "value" ],
                             type: "hrtc",
                             hash: hedgehog.state[ chan_id ].extra_outputs[ hedgehog.state[ chan_id ].extra_outputs.length - 1 ][ "hash" ],
                             //TODO: change the 5 to 2016
+                            //also TODO: make the recipient actually use this variable (right now I always assume 5)
                             time: 5,
                             addy: tapscript.Address.fromScriptPubKey( hedgehog.state[ chan_id ].extra_outputs[ hedgehog.state[ chan_id ].extra_outputs.length - 1 ][ "output" ][ "scriptPubKey" ], hedgehog.network ),
                         }
@@ -672,6 +747,16 @@
                                 hedgehog.state.invoice_hashes[ pmthash ] = {
                                     chan_id,
                                     index: hedgehog.state[ chan_id ][ "extra_outputs" ].length,
+                                    //you need the sender's conditional revocation sig so that
+                                    //if they force close in the old state when you try to
+                                    //resolve the htlc, you can find the transaction containing
+                                    //this sig in txids_to_watch_for and use the data inside it
+                                    //(namely its txid) to prepare a tx that sweeps the utxo
+                                    //using the preimage
+                                    //todo: before putting conditional_revocation_sig here,
+                                    //validate that a key/value pair with that key exists
+                                    //in the info the sender gave you
+                                    conditional_revocation_sig: data[ "conditional_revocation_sig" ],
                                 }
                             }
                             hedgehog.state[ chan_id ][ "extra_outputs" ].push( item_to_push );
@@ -813,7 +898,9 @@
                         }
 
                         //add all extra outputs e.g. unresolved htlcs to new_tx1
-                        new_tx1.vout = [...tx1.vout, ...outputs_to_add];
+                        new_tx1.vout = [...new_tx1.vout, ...outputs_to_add];
+                        var new_tx1_id = tapscript.Tx.util.getTxid( new_tx1 );
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ prev_txid ][ "new_tx1_id" ] = new_tx1_id;
 
                         var new_tx1_script = prev_scripts[ 0 ];
                         var new_tx1_target = tapscript.Tap.encodeScript( new_tx1_script );
@@ -928,11 +1015,12 @@
                         tapscript.Tx.encode( tx1 ).hex,
                     ];
                     if ( conditional_revocation_is_necessary ) {
-                        hedgehog.state[ chan_id ].txids_to_watch_for[ prev_txid ] = {
-                            conditional_revocation_tx: tapscript.Tx.encode( new_tx1 ).hex,
-                        }
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ prev_txid ][ "conditional_revocation_tx" ] = tapscript.Tx.encode( new_tx1 ).hex;
                     }
                     if ( full_revocation_is_necessary ) hedgehog.state[ chan_id ].txids_to_watch_for[ doubly_prev_txid ][ "full_revocation_tx" ] = tapscript.Tx.encode( tx2 ).hex;
+                    var tx1_id = tapscript.Tx.util.getTxid( tx1 );
+                    if ( !( tx0_id in hedgehog.state[ chan_id ].txids_to_watch_for ) ) hedgehog.state[ chan_id ].txids_to_watch_for[ tx0_id ] = {}
+                    hedgehog.state[ chan_id ].txids_to_watch_for[ tx0_id ][ "tx1_id" ] = tx1_id;
 
                     //update the balances
                     if ( am_alice ) {
@@ -972,7 +1060,7 @@
                                 await nwcjs.waitSomeSeconds( 1 );
                                 time_waited = time_waited + 1;
                                 console.log( `time waited:`, time_waited );
-                                if ( !preimage ) return await loop();
+                                if ( !preimage && !stop ) return await loop();
                                 return preimage;
                             }
                             await loop();
@@ -984,8 +1072,6 @@
                 },
                 invoicePaid: async () => {
                     var preimage = prompt( `Enter the preimage of the invoice you paid or data from your counterparty if they claim they paid it` );
-                    //TODO: prepare a transaction sweeping the htlc via its preimage in case
-                    //your counterparty doesn't resolve the htlc in a timely manner
                     if ( preimage.length === 64 ) {
                         var hash_given = await nobleSecp256k1.utils.sha256( hedgehog.hexToBytes( preimage ) );
                         hash_given = hedgehog.bytesToHex( hash_given );
@@ -1000,8 +1086,67 @@
                                 index,
                             }
                         }
-                        //update the balances
+
+                        //prepare two txs sweeping the htlc via its preimage in case
+                        //your counterparty doesn't resolve the htlc in a timely manner
+                        //or tries to force close in an old state
+                        var txid_for_delayed_resolution = tapscript.Tx.util.getTxid( hedgehog.state[ chan_id ].latest_force_close_txs[ 1 ] );
+                        var txid_of_delay_parent = tapscript.Tx.util.getTxid( hedgehog.state[ chan_id ].latest_force_close_txs[ 0 ] );
+                        var txid_for_updating_old_state;
+                        var txid_of_update_parent;
+                        //use the conditional_revocation_sig in info_for_counterparty to
+                        //find the transaction by which the sender allows the recipient
+                        //to update the old state to the current state, and set the
+                        //txid_for_updating_old_state to the corresponding new_tx1_id
+                        Object.keys( hedgehog.state[ chan_id ].txids_to_watch_for ).every( txid => {
+                            if ( !( "conditional_revocation_tx" in hedgehog.state[ chan_id ].txids_to_watch_for[ txid ] ) ) return true;
+                            if ( hedgehog.state[ chan_id ].txids_to_watch_for[ txid ][ "conditional_revocation_tx" ].includes( info_for_counterparty[ "conditional_revocation_sig" ] ) ) {
+                                txid_for_updating_old_state = hedgehog.state[ chan_id ].txids_to_watch_for[ txid ][ "new_tx1_id" ];
+                                txid_of_update_parent = txid;
+                                return;
+                            }
+                        });
+                        var vout = index + 2;
+                        if ( hedgehog.state[ chan_id ].balances.includes( 0 ) ) vout = index + 1;
+                        var amnt = hedgehog.state[ chan_id ].extra_outputs[ index ][ "output" ][ "value" ];
+                        var addy = tapscript.Address.fromScriptPubKey( hedgehog.state[ chan_id ].extra_outputs[ index ][ "output" ][ "scriptPubKey" ], hedgehog.network );
                         var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+                        if ( am_alice ) var my_address = hedgehog.state[ chan_id ].alices_address;
+                        else var my_address = hedgehog.state[ chan_id ].bobs_address;
+                        if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_privkey;
+                        else var privkey = hedgehog.state[ chan_id ].bobs_privkey;
+                        var sweep_tx_1 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( txid_for_delayed_resolution, vout, amnt, addy )],
+                            vout: [hedgehog.getVout( amnt - 500, my_address )],
+                        });
+                        var am_sender = false;
+                        var [ htlc_address, htlc_preimage, htlc_hash, htlc_scripts ] = hedgehog.createHtlc( chan_id, am_sender, hash_given );
+                        var sweep_tx_script = htlc_scripts[ 1 ];
+                        var sweep_tx_target = tapscript.Tap.encodeScript( sweep_tx_script );
+                        var sweep_tx_tree = htlc_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                        var sweep_sig_1 = tapscript.Signer.taproot.sign( privkey, sweep_tx_1, 0, { extension: sweep_tx_target }).hex;
+                        var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: sweep_tx_tree, target: sweep_tx_target });
+                        sweep_tx_1.vin[ 0 ].witness = [ sweep_sig_1, preimage, sweep_tx_script, cblock ];
+                        var sweep_tx_1_txhex = tapscript.Tx.encode( sweep_tx_1 ).hex;
+                        var sweep_tx_2 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( txid_for_updating_old_state, vout, amnt, addy )],
+                            vout: [hedgehog.getVout( amnt - 500, my_address )],
+                        });
+                        var sweep_sig_2 = tapscript.Signer.taproot.sign( privkey, sweep_tx_2, 0, { extension: sweep_tx_target }).hex;
+                        sweep_tx_2.vin[ 0 ].witness = [ sweep_sig_2, preimage, sweep_tx_script, cblock ];
+                        var sweep_tx_2_txhex = tapscript.Tx.encode( sweep_tx_2 ).hex;
+
+                        //save the two txs sweeping the htlc via its preimage in case
+                        //your counterparty doesn't resolve the htlc in a timely manner
+                        //or tries to force close in an old state
+                        if ( !( "preimage_sweep_txs" in hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_delay_parent ] ) )
+                            hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_delay_parent ][ "preimage_sweep_txs" ] = [];
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_delay_parent ][ "preimage_sweep_txs" ].push( sweep_tx_1_txhex );
+                        if ( !( "update_tx_preimage_sweep_txs" in hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_delay_parent ] ) )
+                            hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_update_parent ][ "update_tx_preimage_sweep_txs" ] = [];
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ txid_of_update_parent ][ "update_tx_preimage_sweep_txs" ].push( sweep_tx_2_txhex );
+
+                        //update the balances
                         var value_to_add = hedgehog.state[ chan_id ].extra_outputs[ index ][ "output" ][ "value" ];
                         if ( am_alice ) hedgehog.state[ chan_id ].balances = [ hedgehog.state[ chan_id ].balances[ 0 ] + value_to_add, hedgehog.state[ chan_id ].balances[ 1 ] - value_to_add ];
                         else hedgehog.state[ chan_id ].balances = [ hedgehog.state[ chan_id ].balances[ 0 ] - value_to_add, hedgehog.state[ chan_id ].balances[ 1 ] + value_to_add ];
