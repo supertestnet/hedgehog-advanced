@@ -1037,12 +1037,12 @@
                     hedgehog.state[ chan_id ].i_was_last_to_send = false;
 
                     if ( invoice ) {
-                        if ( !nwcjs.nwc_objs.length ) {
+                        if ( !nwcjs.nwc_infos.length ) {
                             console.log( `Please pay this invoice:` );
                             console.log( invoice );
                             setTimeout( () => {alert( `Please pay the invoice in your console` );}, 300 );
                         } else {
-                            var nwc_obj = nwcjs.nwc_objs[ 0 ];
+                            var nwc_obj = nwcjs.nwc_infos[ 0 ];
                             await nwcjs.tryToPayInvoice( nwc_obj, invoice );
                             var preimage;
                             var time_waited = 0;
